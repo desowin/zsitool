@@ -57,7 +57,7 @@ int main(int argc, char **argv)
 
     if (argc < 2)
     {
-        printf("Usage: ./connecttool file1.srr file2.srr\n");
+        printf("Usage: ./zsitool file1.srr file2.srr\n");
         return 1;
     }
 
