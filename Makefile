@@ -1,5 +1,5 @@
-CC = gcc
-CFLAGS = -Wall -g
+CC ?= gcc
+CFLAGS = -Wall -g `pkg-config --cflags libusb-1.0`
 OFLAG = -o
 LIBS = `pkg-config --libs libusb-1.0`
 
@@ -10,7 +10,7 @@ LIBS = `pkg-config --libs libusb-1.0`
 all: zsitool
 
 zsitool: zsitool.o
-	$(CC) $(LIBS) $(OFLAG) zsitool zsitool.o
+	$(CC) $(OFLAG) zsitool zsitool.o $(LIBS)
 
 zsitool.o: zsitool.c
 
