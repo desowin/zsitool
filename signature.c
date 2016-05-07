@@ -37,7 +37,33 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <openssl/sha.h>
+#include <openssl/bn.h>
 #include "signature.h"
+
+#define N_ELEMENTS(array) (sizeof(array)/sizeof(array[0]))
+
+/*! RSA public exponent in Big Endian. */
+static uint8_t be_exponent[] = { 0x29 };
+/*! RSA modulus in Big Endian. */
+static uint8_t be_modulus[] =
+{
+0xb5, 0x3e, 0x28, 0x3a, 0xd7, 0xcd, 0xae, 0x18, 0x85, 0x3a, 0xc5, 0x0c, 0xbc, 0xa4, 0x88, 0xf0,
+0x9d, 0x48, 0x0e, 0x4d, 0x33, 0x2e, 0xe5, 0x83, 0xac, 0xa8, 0x27, 0x79, 0x46, 0x86, 0xa5, 0xe5,
+0x1b, 0xc7, 0x12, 0xec, 0xea, 0xe1, 0x25, 0x86, 0xfe, 0x0e, 0xf8, 0x49, 0xa3, 0xe0, 0x47, 0x9a,
+0x72, 0x46, 0xed, 0x9b, 0x03, 0x0f, 0xc7, 0x19, 0xf5, 0x24, 0x5d, 0x14, 0xff, 0x08, 0xc3, 0x74,
+0x95, 0x26, 0x9f, 0x83, 0x8e, 0xe1, 0x57, 0xb9, 0x0e, 0xd9, 0x37, 0x54, 0x8a, 0x54, 0x30, 0x0c,
+0x95, 0x24, 0x30, 0x5e, 0xa6, 0x17, 0x68, 0x4f, 0xcf, 0xdb, 0x3b, 0xee, 0x62, 0xeb, 0xa6, 0xac,
+0xb0, 0xe2, 0x42, 0x82, 0x75, 0xdd, 0x9e, 0x84, 0xc7, 0x24, 0x1f, 0x8c, 0x7a, 0xe8, 0xec, 0x8e,
+0xb2, 0x09, 0x0f, 0x69, 0x65, 0xa4, 0x9e, 0x2b, 0x57, 0x34, 0xa4, 0xd6, 0x71, 0xfd, 0x9b, 0x0e,
+0x5e, 0xaf, 0x27, 0xe7, 0x56, 0xce, 0x33, 0xde, 0xfb, 0x75, 0x44, 0x8f, 0x6e, 0xf7, 0x9e, 0xfb,
+0xc3, 0x96, 0x68, 0x99, 0x5f, 0xa5, 0x1a, 0xc4, 0x8f, 0x12, 0x6d, 0xfe, 0x52, 0x99, 0x26, 0xd2,
+0x00, 0xc8, 0x37, 0x68, 0x2d, 0xb0, 0x73, 0xe3, 0x7e, 0x8a, 0xeb, 0xce, 0xdb, 0x7b, 0xbf, 0xb9,
+0xd9, 0xe4, 0x07, 0x92, 0x17, 0x07, 0x48, 0xf5, 0x9b, 0x33, 0xf8, 0x8e, 0xbf, 0x61, 0xa8, 0x22,
+0x15, 0x4d, 0x07, 0xcd, 0x89, 0x92, 0x63, 0x19, 0x00, 0xd5, 0x8d, 0x0e, 0x92, 0xee, 0x22, 0xbc,
+0x4f, 0x2b, 0x96, 0x10, 0x99, 0xf4, 0xa4, 0x72, 0xf3, 0xd8, 0x03, 0x18, 0x83, 0x04, 0x36, 0x5a,
+0x14, 0x87, 0xd6, 0xc6, 0xbb, 0xc4, 0xfe, 0x9c, 0x4d, 0xee, 0x52, 0x2e, 0x6f, 0x0b, 0xe6, 0xda,
+0xaa, 0x0c, 0xba, 0xd3, 0xf3, 0xae, 0x76, 0x7c, 0xae, 0xfd, 0x71, 0xed, 0xa9, 0x7d, 0x01, 0xe1
+};
 
 /* Signature is last 2048 bytes of srr_file_data */
 #define SRR_SIG_SIZE                                     2048
@@ -62,6 +88,8 @@ E_RFC4880_Hash;
  * \param[out] sig_type_ptr Place to store pointer to data that needs to be
  *                          concatenated with actual data before hashing.
  * \param[out] hash_type Place to store hash method used.
+ * \param[out] RSA_m_pow_d_mod_n BIGNUM to store RSA encrypted message,
+ *                               which is pow(m, d) mod n.
  *
  * \return true if Sansa Connect bootloader would accept such signature.
  *              However the firmware check might still fail, because
@@ -71,7 +99,8 @@ E_RFC4880_Hash;
  */
 static bool parse_rfc4880_signature(const uint8_t *signature,
                                     const uint8_t **sig_type_ptr,
-                                    E_RFC4880_Hash *hash_type)
+                                    E_RFC4880_Hash *hash_type,
+                                    BIGNUM *RSA_m_pow_d_mod_n)
 {
     uint8_t PTag;
     const uint8_t *mpi_data;
@@ -167,9 +196,12 @@ static bool parse_rfc4880_signature(const uint8_t *signature,
         return false;
     }
 
-    /* TODO: Read MPI into BIGNUM */
-    (void)mpi_data;
-    (void)mpi_length;
+    if (RSA_m_pow_d_mod_n != BN_bin2bn(mpi_data, mpi_length, RSA_m_pow_d_mod_n))
+    {
+        printf("Failed to convert MPI to BIGNUM!\n");
+        return false;
+    }
+
     return true;
 }
 
@@ -186,25 +218,40 @@ static bool parse_rfc4880_signature(const uint8_t *signature,
 static bool validate_srr_signature(const uint8_t *srr_file_data, int srr_file_length,
                                    bool verbose)
 {
+    BIGNUM *RSA_encrypted = NULL;
+    BIGNUM *RSAe = NULL;
+    BIGNUM *RSAn = NULL;
+    BIGNUM *RSA_decrypted = NULL;
+    BN_CTX *bignum_ctx = NULL;
+    char *tmp;
+
+    bool result = false;
     const uint8_t *rfc4880_hashed_data = NULL;
     E_RFC4880_Hash hash_type;
+
     if (srr_file_length < SRR_SIG_SIZE + SRR_HEADER_SIZE)
     {
         if (verbose)
         {
             printf("File is too small to be .srr file\n");
         }
-        return false;
+        goto exit;
     }
 
+    RSA_encrypted = BN_new();
+    if (NULL == RSA_encrypted)
+    {
+        printf("Failed to allocate BIGNUM!\n");
+        goto exit;
+    }
     if (!parse_rfc4880_signature(&srr_file_data[srr_file_length-SRR_SIG_SIZE],
-                                 &rfc4880_hashed_data, &hash_type))
+                                 &rfc4880_hashed_data, &hash_type, RSA_encrypted))
     {
         if (verbose)
         {
             printf("Invalid signature packet!\n");
         }
-        return false;
+        goto exit;
     }
 
     if (hash_type == E_RFC4880_HASH_SHA1)
@@ -247,10 +294,58 @@ static bool validate_srr_signature(const uint8_t *srr_file_data, int srr_file_le
         {
             printf("Unsupported Hash type!\n");
         }
-        return false;
+        goto exit;
     }
 
-    return true;
+    /* Load modulus and exponents. */
+    RSAe = BN_bin2bn(be_exponent, N_ELEMENTS(be_exponent), NULL);
+    if (RSAe == NULL)
+    {
+        fprintf(stderr, "Failed to load exponent!\n");
+        goto exit;
+    }
+    RSAn = BN_bin2bn(be_modulus, N_ELEMENTS(be_modulus), NULL);
+    if (RSAn == NULL)
+    {
+        fprintf(stderr, "Failed to load modulus!\n");
+        goto exit;
+    }
+
+    RSA_decrypted = BN_new();
+    if (RSA_decrypted == NULL)
+    {
+        fprintf(stderr, "Failed to allocate BIGNUM for RSA result!\n");
+        goto exit;
+    }
+
+    bignum_ctx = BN_CTX_new();
+    if (bignum_ctx == NULL)
+    {
+        fprintf(stderr, "Failed to allocate BIGNUM context!\n");
+        goto exit;
+    }
+
+    /* Perform RSA. */
+    if (!BN_mod_exp(RSA_decrypted, RSA_encrypted, RSAe, RSAn, bignum_ctx))
+    {
+        fprintf(stderr, "RSA operation failed!\n");
+        goto exit;
+    }
+
+    tmp = BN_bn2hex(RSA_decrypted);
+    printf("Signature: %s\n", tmp);
+    OPENSSL_free(tmp);
+
+    /* TODO: determine how Sansa Connect bootloader verifies signature. */
+
+    result = true;
+
+exit:
+    BN_free(RSA_encrypted);
+    BN_free(RSAe);
+    BN_free(RSAn);
+    BN_free(RSA_decrypted);
+    return result;
 }
 
 /**
