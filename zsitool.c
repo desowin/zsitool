@@ -17,6 +17,8 @@
 #include <libusb-1.0/libusb.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdlib.h>
+#include "signature.h"
 
 #define TIMEOUT 1000
 
@@ -41,7 +43,7 @@ static int write_data(int endpoint, unsigned char *buf, int len)
         {
             case 0: break;
 
-            default: 
+            default:
                 fprintf(stderr, "Error writing, error code %d\n", val);
                 return val;
         }
@@ -50,10 +52,52 @@ static int write_data(int endpoint, unsigned char *buf, int len)
     return val;
 }
 
+static bool check_file(const char *filename)
+{
+    uint8_t *buf;
+    int buf_len;
+
+    FILE *f = fopen(filename, "r");
+    if (f == NULL)
+    {
+        fprintf(stderr, "Unable to open file %s\n", filename);
+        return 1;
+    }
+    printf("Opening %s\n", filename);
+
+    fseek(f, 0L, SEEK_END);
+    buf_len = ftell(f);
+    fseek(f, 0L, SEEK_SET);
+
+    buf = (uint8_t*)malloc(buf_len);
+    if (buf == NULL)
+    {
+        printf("Failed to allocate memory for file contents!\n");
+        return 2;
+    }
+
+    /* Read file */
+    fread(buf, sizeof(char), buf_len, f);
+
+    print_srr_file_info(buf, buf_len);
+
+    free(buf);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int result;
     unsigned char buf[4096];
+
+    if (argc == 2)
+    {
+        if (!check_file(argv[1]))
+        {
+            return 1;
+        }
+        return 0;
+    }
 
     if (argc < 2)
     {
