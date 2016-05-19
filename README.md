@@ -1,5 +1,7 @@
 # Sansa Connect Recovery tool
 
+[![Build Status](https://travis-ci.org/desowin/zsitool.svg?branch=master)](https://travis-ci.org/desowin/zsitool)
+
 ## Command line options
 
  * -c, --check filename.srr
