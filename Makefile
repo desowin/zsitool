@@ -3,7 +3,7 @@ EXTRA_CFLAGS ?=
 EXTRA_LDFLAGS ?=
 CFLAGS := $(shell pkg-config --cflags libusb-1.0 openssl) -Wall -g -ansi -std=c99 $(EXTRA_CFLAGS)
 LDFLAGS = $(EXTRA_LDFLAGS) -Wl,--as-needed
-LDADD := $(shell pkg-config --libs libusb-1.0 openssl)
+LDADD := $(shell pkg-config --libs libusb-1.0 openssl) -lgmp
 OBJECTS = zsitool.o signature.o
 DEPFILES = $(foreach m,$(OBJECTS:.o=),.$(m).m)
 

@@ -37,7 +37,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <openssl/sha.h>
-#include <openssl/bn.h>
+#include <gmp.h>
 #include "signature.h"
 
 #define N_ELEMENTS(array) (sizeof(array)/sizeof(array[0]))
@@ -88,7 +88,7 @@ E_RFC4880_Hash;
  * \param[out] sig_type_ptr Place to store pointer to data that needs to be
  *                          concatenated with actual data before hashing.
  * \param[out] hash_type Place to store hash method used.
- * \param[out] RSA_m_pow_d_mod_n BIGNUM to store RSA encrypted message,
+ * \param[out] RSA_m_pow_d_mod_n GMP integer to store RSA encrypted message,
  *                               which is pow(m, d) mod n.
  *
  * \return true if Sansa Connect bootloader would accept such signature.
@@ -100,7 +100,7 @@ E_RFC4880_Hash;
 static bool parse_rfc4880_signature(const uint8_t *signature,
                                     const uint8_t **sig_type_ptr,
                                     E_RFC4880_Hash *hash_type,
-                                    BIGNUM *RSA_m_pow_d_mod_n)
+                                    mpz_t RSA_m_pow_d_mod_n)
 {
     uint8_t PTag;
     const uint8_t *mpi_data;
@@ -196,12 +196,7 @@ static bool parse_rfc4880_signature(const uint8_t *signature,
         return false;
     }
 
-    if (RSA_m_pow_d_mod_n != BN_bin2bn(mpi_data, mpi_length, RSA_m_pow_d_mod_n))
-    {
-        printf("Failed to convert MPI to BIGNUM!\n");
-        return false;
-    }
-
+    mpz_import(RSA_m_pow_d_mod_n, mpi_length, 1, 1, 1, 0, mpi_data);
     return true;
 }
 
@@ -218,16 +213,19 @@ static bool parse_rfc4880_signature(const uint8_t *signature,
 static bool validate_srr_signature(const uint8_t *srr_file_data, int srr_file_length,
                                    bool verbose)
 {
-    BIGNUM *RSA_encrypted = NULL;
-    BIGNUM *RSAe = NULL;
-    BIGNUM *RSAn = NULL;
-    BIGNUM *RSA_decrypted = NULL;
-    BN_CTX *bignum_ctx = NULL;
-    char *tmp;
-
+    mpz_t RSA_encrypted, RSAe, RSAn, RSA_decrypted;
+    mpz_t data_hash, sig_hash;
     bool result = false;
     const uint8_t *rfc4880_hashed_data = NULL;
     E_RFC4880_Hash hash_type;
+    int hash_len;
+
+    mpz_init(RSA_encrypted);
+    mpz_init(RSAe);
+    mpz_init(RSAn);
+    mpz_init(RSA_decrypted);
+    mpz_init(data_hash);
+    mpz_init(sig_hash);
 
     if (srr_file_length < SRR_SIG_SIZE + SRR_HEADER_SIZE)
     {
@@ -238,12 +236,6 @@ static bool validate_srr_signature(const uint8_t *srr_file_data, int srr_file_le
         goto exit;
     }
 
-    RSA_encrypted = BN_new();
-    if (NULL == RSA_encrypted)
-    {
-        printf("Failed to allocate BIGNUM!\n");
-        goto exit;
-    }
     if (!parse_rfc4880_signature(&srr_file_data[srr_file_length-SRR_SIG_SIZE],
                                  &rfc4880_hashed_data, &hash_type, RSA_encrypted))
     {
@@ -270,6 +262,8 @@ static bool validate_srr_signature(const uint8_t *srr_file_data, int srr_file_le
             printf("%02x", md[i]);
         }
         printf("\n");
+        hash_len = SHA_DIGEST_LENGTH;
+        mpz_import(data_hash, hash_len, 1, 1, 1, 0, &md[0]);
     }
     else if (hash_type == E_RFC4880_HASH_SHA256)
     {
@@ -287,6 +281,8 @@ static bool validate_srr_signature(const uint8_t *srr_file_data, int srr_file_le
             printf("%02x", md[i]);
         }
         printf("\n");
+        hash_len = SHA256_DIGEST_LENGTH;
+        mpz_import(data_hash, hash_len, 1, 1, 1, 0, &md[0]);
     }
     else
     {
@@ -298,53 +294,39 @@ static bool validate_srr_signature(const uint8_t *srr_file_data, int srr_file_le
     }
 
     /* Load modulus and exponents. */
-    RSAe = BN_bin2bn(be_exponent, N_ELEMENTS(be_exponent), NULL);
-    if (RSAe == NULL)
-    {
-        fprintf(stderr, "Failed to load exponent!\n");
-        goto exit;
-    }
-    RSAn = BN_bin2bn(be_modulus, N_ELEMENTS(be_modulus), NULL);
-    if (RSAn == NULL)
-    {
-        fprintf(stderr, "Failed to load modulus!\n");
-        goto exit;
-    }
+    mpz_import(RSAe, N_ELEMENTS(be_exponent), 1, 1, 1, 0, be_exponent);
+    mpz_import(RSAn, N_ELEMENTS(be_modulus), 1, 1, 1, 0, be_modulus);
 
-    RSA_decrypted = BN_new();
-    if (RSA_decrypted == NULL)
+    /* Perform RSA. Side channel attacks are not an issue for zsitool. */
+    mpz_powm(RSA_decrypted, RSA_encrypted, RSAe, RSAn);
+
+    printf("Signature: 0x");
+    mpz_out_str(stdout, 16, RSA_decrypted);
+    printf("\n");
+
+    /* Sansa Connect bootloader only checks hash_len least significant bytes.
+     * Do the same here so if you can forge signature that this function will
+     * accept it will be also accepted by bootloader.
+     */
+    mpz_tdiv_r_2exp(sig_hash, RSA_decrypted, hash_len * 8);
+    if (mpz_cmp(sig_hash, data_hash) == 0)
     {
-        fprintf(stderr, "Failed to allocate BIGNUM for RSA result!\n");
-        goto exit;
+        printf("Valid signature\n");
     }
-
-    bignum_ctx = BN_CTX_new();
-    if (bignum_ctx == NULL)
+    else
     {
-        fprintf(stderr, "Failed to allocate BIGNUM context!\n");
-        goto exit;
+        printf("Invalid signature\n");
     }
-
-    /* Perform RSA. */
-    if (!BN_mod_exp(RSA_decrypted, RSA_encrypted, RSAe, RSAn, bignum_ctx))
-    {
-        fprintf(stderr, "RSA operation failed!\n");
-        goto exit;
-    }
-
-    tmp = BN_bn2hex(RSA_decrypted);
-    printf("Signature: %s\n", tmp);
-    OPENSSL_free(tmp);
-
-    /* TODO: determine how Sansa Connect bootloader verifies signature. */
 
     result = true;
 
 exit:
-    BN_free(RSA_encrypted);
-    BN_free(RSAe);
-    BN_free(RSAn);
-    BN_free(RSA_decrypted);
+    mpz_clear(RSA_encrypted);
+    mpz_clear(RSAe);
+    mpz_clear(RSAn);
+    mpz_clear(RSA_decrypted);
+    mpz_clear(data_hash);
+    mpz_clear(sig_hash);
     return result;
 }
 
