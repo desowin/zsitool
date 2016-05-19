@@ -36,9 +36,53 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <inttypes.h>
-#include <openssl/sha.h>
 #include <gmp.h>
 #include "signature.h"
+
+/* TODO: detect if OpenSSL or libgcrypt should be used */
+#if 0
+#include <openssl/sha.h>
+#else
+/* Emulate OpenSSL API using libgcrypt */
+#include <gcrypt.h>
+#define SHA_DIGEST_LENGTH 20
+#define SHA_CTX gcry_md_hd_t
+void SHA1_Init(SHA_CTX *ctx)
+{
+    gcry_md_open(ctx, GCRY_MD_SHA1, 0);
+}
+
+void SHA1_Update(SHA_CTX *ctx, const void *data, unsigned long len)
+{
+    gcry_md_write(*ctx, data, len);
+}
+
+void SHA1_Final(unsigned char *md, SHA_CTX *ctx)
+{
+    gcry_md_final(*ctx);
+    memcpy(md, gcry_md_read(*ctx, 0), SHA_DIGEST_LENGTH);
+    gcry_md_close(*ctx);
+}
+
+#define SHA256_DIGEST_LENGTH 32
+#define SHA256_CTX gcry_md_hd_t
+void SHA256_Init(SHA_CTX *ctx)
+{
+    gcry_md_open(ctx, GCRY_MD_SHA256, 0);
+}
+
+void SHA256_Update(SHA_CTX *ctx, const void *data, unsigned long len)
+{
+    gcry_md_write(*ctx, data, len);
+}
+
+void SHA256_Final(unsigned char *md, SHA_CTX *ctx)
+{
+    gcry_md_final(*ctx);
+    memcpy(md, gcry_md_read(*ctx, 0), SHA256_DIGEST_LENGTH);
+    gcry_md_close(*ctx);
+}
+#endif
 
 #define N_ELEMENTS(array) (sizeof(array)/sizeof(array[0]))
 
