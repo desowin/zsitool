@@ -21,6 +21,7 @@
 #include <string.h>
 #include <getopt.h>
 #include "signature.h"
+#include "srr.h"
 
 #define TIMEOUT 1000
 
@@ -337,12 +338,13 @@ int main(int argc, char **argv)
             {"bootloader", required_argument, 0, 'b'},
             {"linux",      required_argument, 0, 'l'},
             {"check",      required_argument, 0, 'c'},
+            {"srrgen",     required_argument, 0, 's'},
             {0, 0, 0, 0}
         };
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long(argc, argv, "b:l:c:",
+        c = getopt_long(argc, argv, "b:l:c:s:",
                         long_options, &option_index);
 
         /* Detect the end of the options. */
@@ -384,6 +386,18 @@ int main(int argc, char **argv)
                 {
                     fprintf(stderr, "Check file failed\n");
                     retval = 1;
+                }
+                break;
+            case 's':
+                filenames = &argv[optind - 1];
+                if (optind < argc && *argv[optind] != '-')
+                {
+                    optind++;
+                    generate_srr(filenames[0], filenames[1]);
+                }
+                else
+                {
+                    fprintf(stderr, "Missing output filename");
                 }
                 break;
             default:

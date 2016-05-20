@@ -38,6 +38,7 @@
 #include <inttypes.h>
 #include <gmp.h>
 #include "signature.h"
+#include "srr.h"
 
 /* TODO: detect if OpenSSL or libgcrypt should be used */
 #if 0
@@ -397,7 +398,7 @@ bool print_srr_file_info(const uint8_t *srr_file_data, int srr_file_length)
     }
 
     magic = le32toh(*(uint32_t*)(&srr_file_data[0]));
-    if (magic != 0xEEFFBBAA)
+    if (magic != SRR_HEADER_MAGIC)
     {
         printf("Invalid SRR file magic!\n");
         return false;
