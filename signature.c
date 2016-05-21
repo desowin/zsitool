@@ -36,6 +36,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <gmp.h>
 #include "signature.h"
 #include "srr.h"
@@ -416,4 +417,238 @@ bool print_srr_file_info(const uint8_t *srr_file_data, int srr_file_length)
                srr_file_length);
     }
     return validate_srr_signature(srr_file_data, srr_file_length, true);
+}
+
+#define FORGE_BITS (SHA_DIGEST_LENGTH*8)
+
+struct forge_workshop
+{
+    int forge_bits;
+    unsigned long int e;   /* RSA Public Exponent in unsigned long int */
+    mpz_t RSAe;            /* RSA Public Exponent */
+    mpz_t RSAn;            /* RSA modulus */
+    mpz_t forge_modulo;    /* Forge modulus = (2 ** forge_bits) */
+    mpz_t RSAe_inverse;    /* Modular multiplicative inverse of e under modulo phi(2 ** forge_bits) */
+    mpz_t reduced_inverse; /* Temporary RSAe_inverse if problem was reduced by n*e bits */
+    mpz_t reduced_modulo;  /* Temporary forge_modulo if problem was reduced by n*e bits */
+    mpz_t tmp;             /* Temporary value */
+    mpz_t tmp2;            /* Temporary value 2 */
+};
+
+static void forge_workshop_free(struct forge_workshop *workshop)
+{
+    mpz_clear(workshop->RSAe);
+    mpz_clear(workshop->RSAn);
+    mpz_clear(workshop->forge_modulo);
+    mpz_clear(workshop->RSAe_inverse);
+    mpz_clear(workshop->reduced_inverse);
+    mpz_clear(workshop->reduced_modulo);
+    mpz_clear(workshop->tmp);
+    mpz_clear(workshop->tmp2);
+    memset(workshop, 0, sizeof(struct forge_workshop));
+}
+
+static bool forge_workshop_init(struct forge_workshop *workshop)
+{
+    workshop->forge_bits = (SHA_DIGEST_LENGTH * 8);
+
+    mpz_init(workshop->RSAe);
+    mpz_init(workshop->RSAn);
+    mpz_init(workshop->forge_modulo);
+    mpz_init(workshop->RSAe_inverse);
+    mpz_init(workshop->reduced_inverse);
+    mpz_init(workshop->reduced_modulo);
+    mpz_init(workshop->tmp);
+    mpz_init(workshop->tmp2);
+    mpz_import(workshop->RSAe, N_ELEMENTS(be_exponent), 1, 1, 1, 0, be_exponent);
+    if (!mpz_fits_ulong_p(workshop->RSAe))
+    {
+        fprintf(stderr, "Unable to forge for such exponent\n");
+        forge_workshop_free(workshop);
+        return false;
+    }
+    workshop->e = mpz_get_ui(workshop->RSAe);
+    mpz_import(workshop->RSAn, N_ELEMENTS(be_modulus), 1, 1, 1, 0, be_modulus);
+    mpz_ui_pow_ui(workshop->forge_modulo, 2, workshop->forge_bits);
+
+    /* Calculate RSAe_inverse.
+     * 1. Calculate phi(2 ** forge_bits) = 2 ** (forge_bits-1).
+     * 2. Calculate modular multiplicative inverse of RSAe modulo phi(2 ** forge_bits).
+     */
+    mpz_ui_pow_ui(workshop->tmp, 2, workshop->forge_bits - 1);
+    if (!mpz_invert(workshop->RSAe_inverse, workshop->RSAe, workshop->tmp))
+    {
+        fprintf(stderr, "Unable to find RSAe modulular inverse\n");
+        forge_workshop_free(workshop);
+        return false;
+    }
+
+    return true;
+}
+
+static bool forge_signature_mod_inv(mpz_t forged, mpz_t hash, struct forge_workshop *workshop)
+{
+    int zero_bits;
+    int reduced_bits;
+
+    if (mpz_cmp(workshop->forge_modulo, hash) <= 0)
+    {
+        fprintf(stderr, "Invalid input hash to forge_signature_mod_inv()!\n");
+        abort();
+        return false;
+    }
+
+    if (mpz_cmp_ui(hash, 0) == 0)
+    {
+        /* Trivial case, forged value is also zero. */
+        mpz_set_ui(forged, 0);
+        return true;
+    }
+
+    /* Count number of least significant zero bits. */
+    zero_bits = 0;
+    while ((zero_bits < workshop->forge_bits) && (mpz_tstbit(hash, zero_bits) == 0))
+    {
+        zero_bits++;
+    }
+
+    if (zero_bits % workshop->e)
+    {
+        /* ((forged ** RSAe) modulo workshop->forge_modulo = hash) does not exist. */
+        printf("not exist\n");
+        return false;
+    }
+    reduced_bits = zero_bits / workshop->e;
+    if (reduced_bits)
+    {
+       /* Calculate reduced_inverse.
+        * 1. Calculate phi(2 ** (forge_bits - zero_bits)) = 2 ** (forge_bits - zero_bits - 1).
+        * 2. Calculate modular multiplicative inverse of RSAe modulo phi(2 ** forge_bits - zero_bits - 1).
+        */
+       mpz_ui_pow_ui(workshop->tmp, 2, workshop->forge_bits - zero_bits - 1);
+       if (!mpz_invert(workshop->reduced_inverse, workshop->RSAe, workshop->tmp))
+       {
+           /* This won't happen because gcd(RSAe, workshop->tmp) = 1. */
+           fprintf(stderr, "Unable to find RSAe modulular inverse (zero bits %d)\n", zero_bits);
+           return false;
+       }
+       mpz_ui_pow_ui(workshop->reduced_modulo, 2, workshop->forge_bits - zero_bits);
+
+       /* 1. Reduce hash by (2 ** zero_bits).
+        * 2. Forge signature modulo reduced_modulo.
+        * 3. Multiply forged signature by (2 ** reduced_bits).
+        *
+        * Note: this works because ((2 ** reduced_bits) ** RSAe) = (2 ** zero_bits).
+        */
+       mpz_tdiv_q_2exp(workshop->tmp, hash, zero_bits);
+       mpz_powm(workshop->tmp2, workshop->tmp, workshop->reduced_inverse, workshop->reduced_modulo);
+
+       mpz_mul_2exp(forged, workshop->tmp2, reduced_bits);
+    }
+    else
+    {
+        /* Forge signature. */
+        mpz_powm(forged, hash, workshop->RSAe_inverse, workshop->forge_modulo);
+    }
+
+    /* We have forged signature modulo forge_modulo.
+     * However, there is very low probability that it will also work modulo RSAn.
+     */
+    return true;
+}
+
+static bool verify_forged_signature(mpz_t forged, mpz_t hash, struct forge_workshop *workshop)
+{
+    /* Forged signature modulo RSAn. */
+    mpz_powm(workshop->tmp, forged, workshop->RSAe, workshop->RSAn);
+    mpz_tdiv_r_2exp(workshop->tmp2, workshop->tmp, workshop->forge_bits);
+    if (mpz_cmp(workshop->tmp2, hash) == 0)
+    {
+        /* Successfully forged and forged value works also under modulo RSAn */
+        return true;
+    }
+    return false;
+}
+
+/* Tests forge_signature_mod_inv() against (2 ** 32) + (2 ** 24) values.
+ * These values are guaranteed to be forgable with (forged ** RSAe) < RSAn.
+ * This test takes quite some time to finish but gives a fairly good
+ * confirmation that forge_signature_mod_inv() is working as expected.
+ */
+void test_forge_signature_mod_inv(void)
+{
+    mpz_t hash, forged;
+    mpz_t limit;
+    struct forge_workshop workshop;
+    unsigned long int i, max_i;
+
+    mpz_init(hash);
+    mpz_init(forged);
+    mpz_init(limit);
+    forge_workshop_init(&workshop);
+
+    mpz_root(limit, workshop.RSAn, workshop.e);
+
+    if (!mpz_fits_ulong_p(limit))
+    {
+        fprintf(stderr, "Checking up to maximum unsigned long int.\n");
+        max_i = ULONG_MAX;
+    }
+    else
+    {
+        fprintf(stderr, "Checking up to 0x");
+        mpz_out_str(stdout, 16, limit);
+        printf("\n");
+        max_i = mpz_get_ui(limit);
+    }
+
+    /* Check forged signatures in range [0; 0xFFFFFFFF) */
+    for (i = 0; i < 0xFFFFFFFF; i++)
+    {
+        /* hash = (i ** e) mod (2 ** forge_bits) */
+        mpz_ui_pow_ui(workshop.tmp, i, workshop.e);
+        mpz_tdiv_r_2exp(hash, workshop.tmp, workshop.forge_bits);
+        if (!forge_signature_mod_inv(forged, hash, &workshop))
+        {
+            fprintf(stderr, "Failed to forge (%lu ** RSAe)\n", i);
+        }
+        else if (!verify_forged_signature(forged, hash, &workshop))
+        {
+            fprintf(stderr, "Bug in forgery (%lu ** RSAe)\n", i);
+        }
+        /* Notify user that computation is ongoing. */
+        if ((i % 0x100000) == 0)
+        {
+            printf("Tested up to 0x%jx\n", i);
+        }
+    }
+
+    printf("Skipping a lot of values...\n");
+
+    /* Check forged signatures in range [max_i - 0xFFFFFF; max_i) */
+    for (i = max_i - 0xFFFFFF; i < max_i; i++)
+    {
+        /* hash = (i ** e) mod (2 ** forge_bits) */
+        mpz_ui_pow_ui(workshop.tmp, i, workshop.e);
+        mpz_tdiv_r_2exp(hash, workshop.tmp, workshop.forge_bits);
+        if (!forge_signature_mod_inv(forged, hash, &workshop))
+        {
+            fprintf(stderr, "Failed to forge (%lu ** RSAe)\n", i);
+        }
+        else if (!verify_forged_signature(forged, hash, &workshop))
+        {
+            fprintf(stderr, "Bug in forgery (%lu ** RSAe)\n", i);
+        }
+        /* Notify user that computation is ongoing. */
+        if ((i % 0x100000) == 0)
+        {
+            printf("Tested up to 0x%jx\n", i);
+        }
+    }
+    printf("Test finished\n");
+
+    mpz_clear(hash);
+    mpz_clear(forged);
+    mpz_clear(limit);
+    forge_workshop_free(&workshop);
 }
