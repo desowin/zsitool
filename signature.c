@@ -66,6 +66,17 @@ void SHA1_Final(unsigned char *md, SHA_CTX *ctx)
     gcry_md_close(*ctx);
 }
 
+void SHA1_Copy(SHA_CTX *dest, SHA_CTX *src)
+{
+    gcry_error_t err;
+    err = gcry_md_copy(dest, *src);
+    if (err)
+    {
+        printf("SHA1 Copy failed: %d\n", err);
+        abort();
+    }
+}
+
 #define SHA256_DIGEST_LENGTH 32
 #define SHA256_CTX gcry_md_hd_t
 void SHA256_Init(SHA_CTX *ctx)
@@ -156,7 +167,7 @@ known_signatures[] =
 
 static const int n_known_signatures = N_ELEMENTS(known_signatures);
 
-static bool has_known_sig(uint8_t *hash, int hash_len)
+static int has_known_sig(uint8_t *hash, int hash_len)
 {
     int i;
     for (i = 0; i < n_known_signatures; i++)
@@ -164,10 +175,10 @@ static bool has_known_sig(uint8_t *hash, int hash_len)
         if ((known_signatures[i].hash_len == hash_len) &&
             (memcmp(hash, known_signatures[i].hash, hash_len) == 0))
         {
-            return true;
+            return i;
         }
     }
-    return false;
+    return -1;
 }
 
 /* Signature is last 2048 bytes of srr_file_data */
@@ -416,7 +427,7 @@ static bool validate_srr_signature(const uint8_t *srr_file_data, int srr_file_le
     if (mpz_cmp(sig_hash, data_hash) == 0)
     {
         printf("Valid signature\n");
-        if ((hash_type == E_RFC4880_HASH_SHA1) && !has_known_sig(md, hash_len))
+        if ((hash_type == E_RFC4880_HASH_SHA1) && (has_known_sig(md, hash_len) < 0))
         {
             int i;
             size_t sig_len;
@@ -468,29 +479,21 @@ exit:
  */
 bool print_srr_file_info(const uint8_t *srr_file_data, int srr_file_length)
 {
-    uint32_t magic;
-    uint32_t load_address;
-    uint32_t entry_point;
-    uint32_t file_length;
-
+    SRR_Header *header = (SRR_Header*)&srr_file_data[0];
+    uint32_t file_length = 0;
     if (srr_file_length < SRR_HEADER_SIZE)
     {
         printf("SRR file too small!\n");
         return false;
     }
 
-    magic = le32toh(*(uint32_t*)(&srr_file_data[0]));
-    if (magic != SRR_HEADER_MAGIC)
+    if (!print_srr_header(header))
     {
-        printf("Invalid SRR file magic!\n");
+        printf("Invalid SRR file header!\n");
         return false;
     }
-    load_address = le32toh(*(uint32_t*)(&srr_file_data[4]));
-    entry_point = le32toh(*(uint32_t*)(&srr_file_data[8]));
-    file_length = le32toh(*(uint32_t*)(&srr_file_data[12]));
 
-    printf("Load Address: 0x%08X\nEntry Point: 0x%08X\nData Length: %"PRIu32"\n",
-           load_address, entry_point, file_length);
+    file_length = le32toh(header->le_file_length);
 
     if (file_length + SRR_HEADER_SIZE != (uint32_t)srr_file_length)
     {
@@ -596,7 +599,7 @@ static bool forge_signature_mod_inv(mpz_t forged, mpz_t hash, struct forge_works
     if (zero_bits % workshop->e)
     {
         /* ((forged ** RSAe) modulo workshop->forge_modulo = hash) does not exist. */
-        printf("not exist\n");
+        //printf("not exist\n");
         return false;
     }
     reduced_bits = zero_bits / workshop->e;
@@ -649,6 +652,97 @@ static bool verify_forged_signature(mpz_t forged, mpz_t hash, struct forge_works
         return true;
     }
     return false;
+}
+
+bool forge_signature(const uint8_t *srr_file_data, int srr_file_length)
+{
+    SRR_Header *header;
+    uint32_t file_length;
+    SHA_CTX base_ctx, ctx;
+    unsigned char md[SHA_DIGEST_LENGTH];
+    const uint8_t zero = 0;
+    uint32_t ctime;
+    struct forge_workshop workshop;
+    mpz_t hash, forged;
+    int i;
+    bool success = false;
+
+    header = (SRR_Header*)&srr_file_data[0];
+    if (srr_file_length < SRR_HEADER_SIZE)
+    {
+        printf("SRR file too small!\n");
+        return false;
+    }
+
+    if (!print_srr_header(header))
+    {
+        printf("Invalid SRR file header!\n");
+        return false;
+    }
+
+    file_length = le32toh(header->le_file_length);
+
+    if (file_length + SRR_HEADER_SIZE != (uint32_t)srr_file_length)
+    {
+        printf("Length in SRR header does not match file size (%d)!\n",
+               srr_file_length);
+    }
+
+    mpz_init(hash);
+    mpz_init(forged);
+    forge_workshop_init(&workshop);
+
+    /* Calculate SHA1 of base (only thing missing is ctime) */
+    SHA1_Init(&base_ctx);
+    SHA1_Update(&base_ctx, &srr_file_data[0], srr_file_length - SRR_SIG_SIZE);
+    SHA1_Update(&base_ctx, &zero, 1);
+
+    ctime = 0;
+    do
+    {
+        SHA1_Copy(&ctx, &base_ctx);
+        SHA1_Update(&ctx, &ctime, 4);
+        SHA1_Final(md, &ctx);
+
+        i = has_known_sig(&md[0], SHA_DIGEST_LENGTH);
+        if ((i >= 0) && (i < n_known_signatures))
+        {
+            printf("Forgery successful!\n");
+            printf("ctime: 0x%08x sig: 0x", ctime);
+            mpz_import(forged, known_signatures[i].sig_len, 1, 1, 1, 0, known_signatures[i].sig);
+            mpz_out_str(stdout, 16, forged);
+            printf("\n");
+            success = true;
+            break;
+        }
+
+        mpz_import(hash, SHA_DIGEST_LENGTH, 1, 1, 1, 0, md);
+
+        if (forge_signature_mod_inv(forged, hash, &workshop) &&
+            verify_forged_signature(forged, hash, &workshop))
+        {
+            printf("Forgery successful!\n");
+            printf("ctime: 0x%08x sig: 0x", ctime);
+            mpz_out_str(stdout, 16, forged);
+            printf("\n");
+            success = true;
+            break;
+        }
+
+        if ((ctime % 0x00100000) == 0)
+        {
+            printf("ctime 0x%08x", ctime);
+        }
+        ctime++;
+    }
+    while (ctime != 0);
+
+    if (!success)
+    {
+        printf("Forgery failed\n");
+    }
+
+    return success;
 }
 
 /* Tests forge_signature_mod_inv() against (2 ** 32) + (2 ** 24) values.

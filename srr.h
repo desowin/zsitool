@@ -38,5 +38,6 @@ SRR_Header;
 #define SRR_HEADER_SIZE                                    16
 
 void generate_srr(char *input_elf_filename, char *output_filename);
+bool print_srr_header(SRR_Header *header);
 
 #endif /* SRR_H */

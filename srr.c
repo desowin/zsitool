@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include <err.h>
 #include <fcntl.h>
 #include <gelf.h>
@@ -306,4 +307,26 @@ exit:
     {
         close(fd);
     }
+}
+
+bool print_srr_header(SRR_Header *header)
+{
+    uint32_t magic;
+    uint32_t load_address;
+    uint32_t entry_point;
+    uint32_t file_length;
+
+    magic = le32toh(header->le_magic);
+    if (magic != SRR_HEADER_MAGIC)
+    {
+        return false;
+    }
+    load_address = le32toh(header->le_load_address);
+    entry_point = le32toh(header->le_entry_point);
+    file_length = le32toh(header->le_file_length);
+
+    printf("Load Address: 0x%08X\nEntry Point: 0x%08X\nData Length: %"PRIu32"\n",
+           load_address, entry_point, file_length);
+
+    return true;
 }

@@ -323,6 +323,39 @@ static bool check_file(const char *filename)
     return true;
 }
 
+static bool forge_file(const char *filename)
+{
+    uint8_t *buf;
+    int buf_len;
+    bool success;
+
+    FILE *f = fopen(filename, "r");
+    if (f == NULL)
+    {
+        fprintf(stderr, "Unable to open file %s\n", filename);
+        return false;
+    }
+    printf("Opening %s\n", filename);
+
+    fseek(f, 0L, SEEK_END);
+    buf_len = ftell(f);
+    fseek(f, 0L, SEEK_SET);
+
+    buf = (uint8_t*)malloc(buf_len);
+    if (buf == NULL)
+    {
+        printf("Failed to allocate memory for file contents!\n");
+        return false;
+    }
+
+    /* Read file */
+    fread(buf, sizeof(char), buf_len, f);
+    success = forge_signature(buf, buf_len);
+    free(buf);
+
+    return success;
+}
+
 int main(int argc, char **argv)
 {
     int c;
@@ -339,12 +372,13 @@ int main(int argc, char **argv)
             {"linux",      required_argument, 0, 'l'},
             {"check",      required_argument, 0, 'c'},
             {"srrgen",     required_argument, 0, 's'},
+            {"forge",      required_argument, 0, 'f'},
             {0, 0, 0, 0}
         };
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long(argc, argv, "b:l:c:s:",
+        c = getopt_long(argc, argv, "b:l:c:s:f:",
                         long_options, &option_index);
 
         /* Detect the end of the options. */
@@ -398,6 +432,12 @@ int main(int argc, char **argv)
                 else
                 {
                     fprintf(stderr, "Missing output filename");
+                }
+                break;
+            case 'f':
+                if (!forge_file(optarg))
+                {
+                    retval = 1;
                 }
                 break;
             default:

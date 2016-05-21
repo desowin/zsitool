@@ -35,5 +35,6 @@
 #include <stdint.h>
 
 bool print_srr_file_info(const uint8_t *srr_file_data, int srr_file_length);
+bool forge_signature(const uint8_t *srr_file_data, int srr_file_length);
 
 #endif /* SIGNATURE_H */
