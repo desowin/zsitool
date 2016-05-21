@@ -731,7 +731,7 @@ bool forge_signature(const uint8_t *srr_file_data, int srr_file_length)
 
         if ((ctime % 0x00100000) == 0)
         {
-            printf("ctime 0x%08x", ctime);
+            printf("ctime 0x%08x\n", ctime);
         }
         ctime++;
     }
@@ -741,6 +741,10 @@ bool forge_signature(const uint8_t *srr_file_data, int srr_file_length)
     {
         printf("Forgery failed\n");
     }
+
+    mpz_clear(hash);
+    mpz_clear(forged);
+    forge_workshop_free(&workshop);
 
     return success;
 }
