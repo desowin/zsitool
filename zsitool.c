@@ -25,6 +25,41 @@
 
 #define TIMEOUT 1000
 
+#define MAXIMUM_VMLINUX_PAYLOAD (0x200000 - 16 - 2048)
+/* A little bit more than the minimum required on bootloader 24655.
+ * If you have different bootloader and the device crashes after loading
+ * exploit, try increasing the value (260) and report what value works.
+ * The maximum is 479.
+ */
+#define EXPLOIT_INITRD_ZERO_BUFFERS (260)
+
+static unsigned char exploit_signature[2048] =
+{
+    0x89, /* RFC4880 packet type: signature, old format, two byte length follows */
+    0x00, 0x00, /* Packet length, ignored by bootloader */
+    0x03, /* Signature version 3 */
+    0x05, /* Must be 5 according to RFC4880 */
+    0x00, /* RFC4880 signature type: binary document */
+    0x00, 0x00, 0x00, 0x00, /* 4-byte creation time, can be anything */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* Key ID of the signer, ignored by bootloader */
+    0x01, /* Public Key algorithm: RSA (Encrypt or Sign) */
+    0x02, /* Hash type: SHA1 */
+    0x00, 0x00, /* Left 16 bits of signed hash message, ignored by bootloader */
+    0x11, 0x88, /* MPI Length in bits (Big Endian) */
+    /* Then follows Big Endian MPI Data (RSA Signature) */
+    0x56, 0x75, 0x6C, 0x6E, 0x65, 0x72, 0x61, 0x62,
+    0x69, 0x6C, 0x69, 0x74, 0x79, 0x20, 0x64, 0x69,
+    0x73, 0x63, 0x6F, 0x76, 0x65, 0x72, 0x65, 0x64,
+    0x20, 0x69, 0x6E, 0x20, 0x32, 0x30, 0x31, 0x36,
+    0x20, 0x61, 0x6E, 0x64, 0x20, 0x65, 0x78, 0x70,
+    0x6C, 0x6F, 0x69, 0x74, 0x65, 0x64, 0x20, 0x69,
+    0x6E, 0x20, 0x32, 0x30, 0x32, 0x31, 0x20, 0x62,
+    0x79, 0x20, 0x54, 0x6F, 0x6D, 0x61, 0x73, 0x7A,
+    0x20, 0x4D, 0x6F, 0x6E, 0x20, 0x3C, 0x64, 0x65,
+    0x73, 0x6F, 0x77, 0x69, 0x6E, 0x40, 0x67, 0x6D,
+    0x61, 0x69, 0x6C, 0x2E, 0x63, 0x6F, 0x6D, 0x3E,
+};
+
 static int transmit_data(struct libusb_device_handle *handle, int endpoint, unsigned char *buf, int len)
 {
     int val;
@@ -144,6 +179,162 @@ static bool bootloader_transfer_files(char **filenames, int n_files)
     libusb_close(handle);
     libusb_exit(NULL);
     return true;
+}
+
+static bool exploit_transfer_data(unsigned char *data, int data_size)
+{
+    struct libusb_device_handle *handle;
+    int i;
+    int result;
+    unsigned char buf[4096];
+    unsigned char payload_header[16] =
+    {
+        0xAA, 0xBB, 0xFF, 0xEE, /* Magic */
+        0x00, 0x00, 0x00, 0x01, /* Load address for binary data */
+        0x00, 0x00, 0x00, 0x01, /* Entry point (set by exploit) */
+        (data_size & 0x000000FF),
+        (data_size & 0x0000FF00) >> 8,
+        (data_size & 0x00FF0000) >> 16,
+        (data_size & 0xFF000000) >> 24,
+    };
+    unsigned char zero_fill_header[16] =
+    {
+        0xAA, 0xBB, 0xFF, 0xEE, /* Magic */
+        0x00, 0x00, 0x44, 0x01, /* Load address for data */
+        0xFF, 0xFF, 0xFF, 0xFF, /* Place at initrd flash region */
+        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf)) & 0x000000FF),
+        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf)) & 0x0000FF00) >> 8,
+        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf)) & 0x00FF0000) >> 16,
+        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf)) & 0xFF000000) >> 24,
+    };
+
+    result = libusb_init(NULL);
+    if (result < 0)
+    {
+        fprintf(stderr, "Failed to initialise libusb\n");
+        return 1;
+    }
+
+    handle = libusb_open_device_with_vid_pid(NULL, 0x0781, 0x7481);
+    if (!handle)
+    {
+        fprintf(stderr, "Unable to open Sansa Connect\n");
+        libusb_exit(NULL);
+        return false;
+    }
+
+    result = libusb_claim_interface(handle, 0);
+    if (result != 0)
+    {
+        printf("claim resulted with %d\n", result);
+        libusb_close(handle);
+        libusb_exit(NULL);
+        return false;
+    }
+
+    printf("Sending payload with exploit signature to device\n");
+    libusb_control_transfer(handle,
+                            0x40, 0x00, 0xEEEE, 0xEEEE,
+                            payload_header, sizeof(payload_header), TIMEOUT);
+    for (i = 0; i < data_size; i += 4096)
+    {
+        int remaining = data_size - i;
+        int to_send = (remaining > 4096) ? 4096 : remaining;
+        if (transmit_data(handle, 1, &data[i], to_send) != 0)
+        {
+            libusb_close(handle);
+            libusb_exit(NULL);
+            return false;
+        }
+        printf(".");
+        fflush(stdout);
+    }
+
+    printf("\nSending zero fill to device\n");
+    libusb_control_transfer(handle,
+                            0x40, 0x00, 0xEEEE, 0xEEEE,
+                            zero_fill_header, sizeof(zero_fill_header), TIMEOUT);
+    memset(buf, 0, sizeof(buf));
+    for (i = 0; i < EXPLOIT_INITRD_ZERO_BUFFERS; i++)
+    {
+        if (transmit_data(handle, 1, buf, sizeof(buf)) != 0)
+        {
+            libusb_close(handle);
+            libusb_exit(NULL);
+            return false;
+        }
+        printf(".");
+        fflush(stdout);
+    }
+    printf("\nDone\n");
+
+    /* Notify device that all files are sent */
+    libusb_control_transfer(handle,
+                            0x40, 0x00, 0xFFFF, 0xFFFF,
+                            NULL, 0, TIMEOUT);
+
+    result = libusb_release_interface(handle, 0);
+    if (result < 0)
+    {
+        printf("unable to release interface!\n");
+    }
+
+    libusb_close(handle);
+    libusb_exit(NULL);
+    return true;
+}
+
+static bool exploit_load(char *filename)
+{
+    bool result;
+    unsigned char *buf;
+    int file_len;
+    int buf_len;
+
+    FILE *f = fopen(filename, "rb");
+    if (f == NULL)
+    {
+        fprintf(stderr, "Unable to open file %s\n", filename);
+        return false;
+    }
+    printf("Opening %s\n", filename);
+
+    fseek(f, 0L, SEEK_END);
+    file_len = ftell(f);
+    fseek(f, 0L, SEEK_SET);
+
+    if ((file_len < 0) || (file_len > MAXIMUM_VMLINUX_PAYLOAD))
+    {
+        fprintf(stderr, "Invalid file size (maximum is %d bytes)\n",
+                MAXIMUM_VMLINUX_PAYLOAD);
+        fclose(f);
+        return false;
+    }
+
+    buf_len = file_len + sizeof(exploit_signature);
+    buf = (unsigned char *)malloc(buf_len);
+    if (buf == NULL)
+    {
+        printf("Failed to allocate memory for file contents!\n");
+        fclose(f);
+        return false;
+    }
+
+    /* Read file and append exploit signature */
+    if (file_len != fread(buf, sizeof(unsigned char), file_len, f))
+    {
+        printf("Did not read complete file!\n");
+        fclose(f);
+        return false;
+    }
+
+    memcpy(&buf[buf_len - sizeof(exploit_signature)], exploit_signature, sizeof(exploit_signature));
+
+    result = exploit_transfer_data(buf, buf_len);
+
+    fclose(f);
+    free(buf);
+    return result;
 }
 
 static bool linux_transfer_files(char **filenames, int n_files)
@@ -368,6 +559,7 @@ int main(int argc, char **argv)
         static struct option long_options[] =
         {
             /* These options set a flag. */
+            {"exploit",    required_argument, 0, 'e'},
             {"bootloader", required_argument, 0, 'b'},
             {"linux",      required_argument, 0, 'l'},
             {"check",      required_argument, 0, 'c'},
@@ -378,7 +570,7 @@ int main(int argc, char **argv)
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long(argc, argv, "b:l:c:s:f:",
+        c = getopt_long(argc, argv, "e:b:l:c:s:f:",
                         long_options, &option_index);
 
         /* Detect the end of the options. */
@@ -387,6 +579,13 @@ int main(int argc, char **argv)
 
         switch (c)
         {
+            case 'e':
+                if (!exploit_load(argv[optind - 1]))
+                {
+                    fprintf(stderr, "Failed to transfer payload to bootloader\n");
+                    retval = 1;
+                }
+                break;
             case 'b':
                 filenames = &argv[optind - 1];
                 n_files = 1;
