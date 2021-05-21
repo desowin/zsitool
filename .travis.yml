@@ -1,6 +1,6 @@
 language: c
 # Needed for libgcrypt20-dev
-dist: trusty
+dist: focal
 compiler: gcc
 before_install:
   - sudo apt-get update -qq
