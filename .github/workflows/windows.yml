@@ -1,0 +1,15 @@
+name: Windows Build
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - uses: msys2/setup-msys2@v2
+      with:
+        install: make pkg-config mingw-w64-x86_64-gcc mingw-w64-x86_64-libgcrypt mingw-w64-x86_64-libusb mingw-w64-x86_64-gmp mingw-w64-x86_64-libelf
+    - uses: actions/checkout@v2
+    - name: Compile
+      run: make

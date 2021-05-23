@@ -1,6 +1,7 @@
 # Sansa Connect Recovery tool
 
 ![Ubuntu Build Status](https://github.com/desowin/zsitool/actions/workflows/ubuntu.yml/badge.svg)
+![Windows Build Status](https://github.com/desowin/zsitool/actions/workflows/windows.yml/badge.svg)
 
 ## Command line options
 
