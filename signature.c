@@ -28,10 +28,6 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses>.
  */
 
-#define _DEFAULT_SOURCE
-#define _BSD_SOURCE
-#include <endian.h>
-
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -493,7 +489,7 @@ bool print_srr_file_info(const uint8_t *srr_file_data, int srr_file_length)
         return false;
     }
 
-    file_length = le32toh(header->le_file_length);
+    file_length = uint32_from_le(header->le_file_length);
 
     if (file_length + SRR_HEADER_SIZE != (uint32_t)srr_file_length)
     {
@@ -680,7 +676,7 @@ bool forge_signature(const uint8_t *srr_file_data, int srr_file_length)
         return false;
     }
 
-    file_length = le32toh(header->le_file_length);
+    file_length = uint32_from_le(header->le_file_length);
 
     if (file_length + SRR_HEADER_SIZE != (uint32_t)srr_file_length)
     {
@@ -759,7 +755,7 @@ void test_forge_signature_mod_inv(void)
     mpz_t hash, forged;
     mpz_t limit;
     struct forge_workshop workshop;
-    unsigned long int i, max_i;
+    uint32_t i, max_i;
 
     mpz_init(hash);
     mpz_init(forged);
@@ -770,8 +766,8 @@ void test_forge_signature_mod_inv(void)
 
     if (!mpz_fits_ulong_p(limit))
     {
-        fprintf(stderr, "Checking up to maximum unsigned long int.\n");
-        max_i = ULONG_MAX;
+        fprintf(stderr, "Checking up to maximum unsigned 32-bit int.\n");
+        max_i = UINT32_MAX;
     }
     else
     {
@@ -789,16 +785,16 @@ void test_forge_signature_mod_inv(void)
         mpz_tdiv_r_2exp(hash, workshop.tmp, workshop.forge_bits);
         if (!forge_signature_mod_inv(forged, hash, &workshop))
         {
-            fprintf(stderr, "Failed to forge (%lu ** RSAe)\n", i);
+            fprintf(stderr, "Failed to forge (%" PRIu32 " ** RSAe)\n", i);
         }
         else if (!verify_forged_signature(forged, hash, &workshop))
         {
-            fprintf(stderr, "Bug in forgery (%lu ** RSAe)\n", i);
+            fprintf(stderr, "Bug in forgery (%" PRIu32 " ** RSAe)\n", i);
         }
         /* Notify user that computation is ongoing. */
         if ((i % 0x100000) == 0)
         {
-            printf("Tested up to 0x%jx\n", i);
+            printf("Tested up to 0x%" PRIx32 "\n", i);
         }
     }
 
@@ -812,16 +808,16 @@ void test_forge_signature_mod_inv(void)
         mpz_tdiv_r_2exp(hash, workshop.tmp, workshop.forge_bits);
         if (!forge_signature_mod_inv(forged, hash, &workshop))
         {
-            fprintf(stderr, "Failed to forge (%lu ** RSAe)\n", i);
+            fprintf(stderr, "Failed to forge (%" PRIu32 " ** RSAe)\n", i);
         }
         else if (!verify_forged_signature(forged, hash, &workshop))
         {
-            fprintf(stderr, "Bug in forgery (%lu ** RSAe)\n", i);
+            fprintf(stderr, "Bug in forgery (%" PRIu32 " ** RSAe)\n", i);
         }
         /* Notify user that computation is ongoing. */
         if ((i % 0x100000) == 0)
         {
-            printf("Tested up to 0x%jx\n", i);
+            printf("Tested up to 0x%" PRIx32 "\n", i);
         }
     }
     printf("Test finished\n");

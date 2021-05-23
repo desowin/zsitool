@@ -14,16 +14,12 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses>.
  */
 
-#define _DEFAULT_SOURCE
-#define _BSD_SOURCE
-#include <endian.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
-#include <err.h>
 #include <fcntl.h>
 #include <gelf.h>
 #include <libelf.h>
@@ -174,6 +170,38 @@ static bool find_start_address(Elf *e, uint32_t *out_addr)
     return false;
 }
 
+uint32_t uint32_from_le(uint32_t le)
+{
+    union
+    {
+        uint8_t u8[4];
+        uint32_t u32;
+    }
+    value;
+
+    value.u32 = le;
+    return (value.u8[0]) |
+           (value.u8[1] << 8) |
+           (value.u8[2] << 16) |
+           (value.u8[3] << 24);
+}
+
+uint32_t uint32_to_le(uint32_t host)
+{
+    union
+    {
+        uint8_t u8[4];
+        uint32_t u32;
+    }
+    value;
+
+    value.u8[0] = host & 0x000000FF;
+    value.u8[1] = (host & 0x0000FF00) >> 8;
+    value.u8[2] = (host & 0x00FF0000) >> 16;
+    value.u8[3] = (host & 0xFF000000) >> 24;
+    return value.u32;
+}
+
 #define SRR_DEFAULT_LOAD_ADDRESS          0x02000000
 
 void generate_srr(char *input_elf_filename, char *output_filename)
@@ -207,10 +235,10 @@ void generate_srr(char *input_elf_filename, char *output_filename)
     memset(srr_file_buf, 0, partition_size);
 
     header = (SRR_Header*)&srr_file_buf[0];
-    header->le_magic        = htole32(SRR_HEADER_MAGIC);
-    header->le_load_address = htole32(SRR_DEFAULT_LOAD_ADDRESS);
-    header->le_entry_point  = htole32(0xFFFFFFFF);
-    header->le_file_length  = htole32(0);
+    header->le_magic        = uint32_to_le(SRR_HEADER_MAGIC);
+    header->le_load_address = uint32_to_le(SRR_DEFAULT_LOAD_ADDRESS);
+    header->le_entry_point  = uint32_to_le(0xFFFFFFFF);
+    header->le_file_length  = uint32_to_le(0);
 
     srr_file_used = SRR_HEADER_SIZE;
 
@@ -261,8 +289,8 @@ void generate_srr(char *input_elf_filename, char *output_filename)
     memcpy(&srr_file_buf[srr_file_used - SRR_SIG_SIZE], signature_template, sizeof(signature_template));
 
     /* Update header */
-    header->le_entry_point = htole32(entry_point);
-    header->le_file_length = htole32(srr_file_used - SRR_HEADER_SIZE);
+    header->le_entry_point = uint32_to_le(entry_point);
+    header->le_file_length = uint32_to_le(srr_file_used - SRR_HEADER_SIZE);
 
     if (!print_srr_file_info((const uint8_t *)srr_file_buf, srr_file_used))
     {
@@ -316,14 +344,14 @@ bool print_srr_header(SRR_Header *header)
     uint32_t entry_point;
     uint32_t file_length;
 
-    magic = le32toh(header->le_magic);
+    magic = uint32_from_le(header->le_magic);
     if (magic != SRR_HEADER_MAGIC)
     {
         return false;
     }
-    load_address = le32toh(header->le_load_address);
-    entry_point = le32toh(header->le_entry_point);
-    file_length = le32toh(header->le_file_length);
+    load_address = uint32_from_le(header->le_load_address);
+    entry_point = uint32_from_le(header->le_entry_point);
+    file_length = uint32_from_le(header->le_file_length);
 
     printf("Load Address: 0x%08X\nEntry Point: 0x%08X\nData Length: %"PRIu32"\n",
            load_address, entry_point, file_length);

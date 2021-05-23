@@ -37,6 +37,8 @@ SRR_Header;
 #define SRR_SIG_SIZE                                     2048
 #define SRR_HEADER_SIZE                                    16
 
+uint32_t uint32_from_le(uint32_t le);
+uint32_t uint32_to_le(uint32_t host);
 void generate_srr(char *input_elf_filename, char *output_filename);
 bool print_srr_header(SRR_Header *header);
 
